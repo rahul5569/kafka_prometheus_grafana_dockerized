@@ -1,0 +1,96 @@
+services:
+  kafka_b:
+    image: bitnami/kafka:latest
+    hostname: kafka_b
+    ports:
+      - "9092:9092"  # PLAINTEXT for host access
+      - "9093:9093"  # CONTROLLER listener (if needed)
+    volumes:
+      - kafka_data:/bitnami
+    environment:
+      - KAFKA_ENABLE_KRAFT=yes
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka_b:9092,CONTROLLER://kafka_b:9093
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka_b:9093
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_NUM_PARTITIONS=3
+    healthcheck:
+      test: ["CMD", "sh", "-c", "kafka-topics.sh --bootstrap-server kafka_b:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  init-topics:
+    image: bitnami/kafka:latest
+    container_name: init_topics
+    command: >
+      sh -c "
+        /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka_b:9092 --replication-factor 1 --partitions 3 --topic test-topic
+      "
+    depends_on:
+      kafka_b:
+        condition: service_healthy
+    environment:
+      - ALLOW_PLAINTEXT_LISTENER=yes
+
+  producer:
+    image: python:3.9-slim
+    container_name: producer
+    volumes:
+      - ./:/app  # Mount current directory to /app in container
+    working_dir: /app
+    command: sh -c "apt-get update && apt-get install -y git && pip install --no-cache-dir -r requirements.txt && python producer.py"
+    depends_on:
+      kafka_b:
+        condition: service_healthy
+    ports:
+      - "8000:8000"  # Expose Prometheus metrics port
+    restart: unless-stopped
+
+  consumer:
+    image: python:3.9-slim
+    container_name: consumer
+    volumes:
+      - ./:/app  # Mount current directory to /app in container
+    working_dir: /app
+    command: sh -c "apt-get update && apt-get install -y git && pip install --no-cache-dir -r requirements.txt && python consumer.py"
+    depends_on:
+      kafka_b:
+        condition: service_healthy
+    ports:
+      - "8001:8001"  # Expose Prometheus metrics port
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    ports:
+      - "9090:9090"
+    depends_on:
+      - producer
+      - consumer
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # For Linux users
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  kafka_data:
